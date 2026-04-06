@@ -1,0 +1,31 @@
+# DAIO Configuration
+# See README.md for full documentation
+
+# --- LLM ---
+model: "qwen2.5-coder:7b-instruct-q8_0"  # Any Ollama-compatible model name
+ollama_url: "http://localhost:11434"
+
+# --- Target ---
+target_path: "./fixtures/synthetic_target"  # Path to the codebase to refactor
+rules_path: "./rules.example.md"            # Refactoring instructions for the LLM
+scope: "full"                               # "full" | "module" | "filelist"
+# file_list:                                # Uncomment when scope is "filelist"
+#   - "src/module_a.py"
+#   - "src/module_b.py"
+
+# --- Token Budget ---
+token_budget: 4096                          # Max tokens per work packet (chars / 4)
+header_token_budget: 512                    # Max tokens for global header
+
+# --- Retry & Validation ---
+max_retries: 3                              # LLM retry attempts on validation failure
+loc_shrink_floor: 0.3                       # Min output/input LOC ratio
+loc_growth_ceiling: 3.0                     # Max output/input LOC ratio
+
+# --- Git ---
+auto_commit: true                           # Git-commit per successfully refactored function
+
+# --- Infrastructure ---
+# ruff_config: "./ruff.toml"                # Optional: path to ruff config
+request_timeout: 600                        # Ollama HTTP timeout in seconds
+output_dir: ".daio"                         # Pipeline artifact directory
