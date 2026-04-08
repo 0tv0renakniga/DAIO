@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from daio.surgeon.applicator import apply_transform
+from daio.surgeon.dispatch import DispatchError, _build_llamacpp_command, dispatch as backend_dispatch
 from daio.surgeon.extractor import ExtractionError, extract_transformed_code
 from daio.surgeon.offset import recalculate_offsets
 from daio.surgeon.ollama_client import OllamaError, dispatch
@@ -413,6 +414,68 @@ class TestOllamaClient:
             assert result == "transformed code"
 
 
+class TestBackendDispatch:
+    """Tests for backend-aware dispatch and llama-cli command construction."""
+
+    def test_build_llamacpp_command_maps_all_flags(self, tmp_path: Path) -> None:
+        """llama-cli command should map config keys to the expected flags."""
+        from daio.config import DAIOConfig
+
+        rules_file = tmp_path / "rules.md"
+        rules_file.write_text("rules", encoding="utf-8")
+        gguf = tmp_path / "model.gguf"
+        gguf.write_text("gguf", encoding="utf-8")
+
+        config = DAIOConfig(
+            model="unused-for-llamacpp",
+            target_path=tmp_path,
+            rules_path=rules_file,
+            backend="llamacpp",
+            gguf_model_path=gguf,
+            n_ctx=16384,
+            n_gpu_layers="auto",
+            n_threads=12,
+            n_predict=-1,
+            temperature=0.25,
+            flash_attn="auto",
+            mmap=False,
+            mlock=True,
+            request_timeout=60,
+        )
+
+        cmd = _build_llamacpp_command(config)
+        assert "-m" in cmd and str(gguf.resolve()) in cmd
+        assert "-c" in cmd and "16384" in cmd
+        assert "-ngl" in cmd and "auto" in cmd
+        assert "-t" in cmd and "12" in cmd
+        assert "-n" in cmd and "-1" in cmd
+        assert "--temp" in cmd and "0.25" in cmd
+        assert "-fa" in cmd and "auto" in cmd
+        assert "--no-mmap" in cmd
+        assert "--mlock" in cmd
+        assert "--log-disable" in cmd
+        assert "--simple-io" in cmd
+
+    def test_dispatch_uses_ollama_backend_when_selected(self, tmp_path: Path) -> None:
+        """Backend dispatch should route to Ollama for backend='ollama'."""
+        from daio.config import DAIOConfig
+
+        rules_file = tmp_path / "rules.md"
+        rules_file.write_text("rules", encoding="utf-8")
+        config = DAIOConfig(
+            model="test-model",
+            target_path=tmp_path,
+            rules_path=rules_file,
+            backend="ollama",
+            request_timeout=60,
+        )
+
+        with patch("daio.surgeon.dispatch.ollama_dispatch", return_value="ok") as mock_ollama:
+            out = backend_dispatch("prompt", config)
+            assert out == "ok"
+            mock_ollama.assert_called_once()
+
+
 # ===================================================================
 # Integration: Surgeon Loop (Mocked Ollama)
 # ===================================================================
@@ -583,8 +646,88 @@ class TestSurgeonRun:
             budget_status="OK",
         )
 
-        with patch("daio.surgeon.dispatch", side_effect=OllamaError("server down")):
+        with patch("daio.surgeon.dispatch", side_effect=DispatchError("server down")):
             results = surgeon_run(config, manifest, [packet])
 
         assert results["aaa111bbb222"]["status"] == "FAILED"
         assert any("server down" in e for e in results["aaa111bbb222"]["errors"])
+
+    def test_validator_flags_and_dataset_export_wired(self, anchored_file: Path, tmp_path: Path) -> None:
+        """Surgeon should pass Stage 3 flags and export dataset on success."""
+        from daio.config import DAIOConfig
+        from daio.sieve.work_packet import WorkPacket
+        from daio.surgeon import run as surgeon_run
+
+        rules_file = tmp_path / "rules.md"
+        rules_file.write_text("Add docstrings.", encoding="utf-8")
+
+        config = DAIOConfig(
+            model="test-model",
+            target_path=tmp_path,
+            rules_path=rules_file,
+            auto_commit=False,
+            max_retries=1,
+            enable_sast=True,
+            sast_tool="semgrep",
+            enable_typecheck=True,
+            type_checker="pyright",
+            dataset_export_enabled=True,
+            dataset_output_path=tmp_path / "dataset.jsonl",
+        )
+
+        manifest = {
+            "base_path": str(tmp_path),
+            "files": {
+                "source.py": {
+                    "functions": [
+                        {
+                            "name": "add",
+                            "uid": "aaa111bbb222",
+                            "start_line": 3,
+                            "end_line": 6,
+                            "status": "PENDING",
+                        },
+                    ],
+                },
+            },
+        }
+
+        packet = WorkPacket(
+            uid="aaa111bbb222",
+            function_name="add",
+            file_path="source.py",
+            packet_text="test prompt",
+            snippet_lines=["def add(a, b):", "    return a + b"],
+            estimated_tokens=100,
+            budget_status="OK",
+        )
+
+        good_response = (
+            "# UID:aaa111bbb222:START\n"
+            "def add(a, b):\n"
+            '    """Add two numbers."""\n'
+            "    return a + b\n"
+            "# UID:aaa111bbb222:END\n"
+        )
+
+        with patch("daio.surgeon.dispatch", return_value=good_response), patch(
+            "daio.surgeon.validate",
+            return_value=ValidationResult(
+                passed=True,
+                syntax_ok=True,
+                lint_ok=True,
+                loc_ok=True,
+                sast_ok=True,
+                typecheck_ok=True,
+                errors=[],
+            ),
+        ) as mock_validate, patch("daio.surgeon.export_training_pair") as mock_export:
+            results = surgeon_run(config, manifest, [packet])
+
+        assert results["aaa111bbb222"]["status"] == "SUCCESS"
+        _, kwargs = mock_validate.call_args
+        assert kwargs["enable_sast"] is True
+        assert kwargs["sast_tool"] == "semgrep"
+        assert kwargs["enable_typecheck"] is True
+        assert kwargs["type_checker"] == "pyright"
+        mock_export.assert_called_once()

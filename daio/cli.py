@@ -30,11 +30,23 @@ console = Console()
 
 DEFAULT_CONFIG = """\
 # DAIO Configuration
-# See: https://github.com/your-org/daio for full documentation
+# See README.md for full documentation
 
 # --- LLM ---
 model: "qwen2.5-coder:7b-instruct-q8_0"  # Any Ollama-compatible model name
 ollama_url: "http://localhost:11434"
+backend: "ollama"                        # "ollama" | "llamacpp"
+
+# --- llama.cpp (used when backend=llamacpp) ---
+# gguf_model_path: "/models/model.gguf"  # -m / --model
+n_ctx: 8192                               # -c / --ctx-size
+n_gpu_layers: 0                           # -ngl / --n-gpu-layers (int | "auto" | "all")
+# n_threads: 8                            # -t / --threads
+n_predict: 4096                           # -n / --predict (-1 = infinity)
+temperature: 0.1                          # --temp / --temperature
+flash_attn: "auto"                        # -fa / --flash-attn ("on" | "off" | "auto")
+mmap: true                                # --mmap / --no-mmap
+mlock: false                              # --mlock
 
 # --- Target ---
 target_path: "./target"       # Path to the codebase to refactor
@@ -47,6 +59,7 @@ scope: "full"                 # "full" | "module" | "filelist"
 # --- Token Budget ---
 token_budget: 4096            # Max tokens per work packet (chars / 4)
 header_token_budget: 512      # Max tokens for global header (imports/constants)
+prompt_template_path: null    # Optional custom prompt template file
 
 # --- Retry & Validation ---
 max_retries: 3                # LLM retry attempts on validation failure
@@ -59,6 +72,13 @@ auto_commit: true             # Git-commit per successfully refactored function
 # --- Infrastructure ---
 # ruff_config: "./ruff.toml"  # Optional: path to ruff config
 request_timeout: 600          # Ollama HTTP timeout in seconds (CPU can be slow)
+enable_sast: false            # Enable security validation gate
+sast_tool: "bandit"           # "bandit" | "semgrep"
+enable_typecheck: false       # Enable type-check validation gate
+type_checker: "mypy"          # "mypy" | "pyright"
+token_counter_backend: "heuristic"  # "heuristic" | "tiktoken"
+dataset_export_enabled: false # Export successful transforms as JSONL
+dataset_output_path: ".daio/training_dataset.jsonl"  # Dataset export path
 output_dir: ".daio"           # Pipeline artifact directory
 """
 
@@ -264,9 +284,11 @@ def dry_run(config_path: str) -> None:
     console.print(
         Panel(
             f"Model: {config.model}\n"
+            f"Backend: {config.backend.value}\n"
             f"Target: {config.target_path}\n"
             f"Scope: {config.scope.value}\n"
-            f"Token budget: {config.token_budget}",
+            f"Token budget: {config.token_budget}\n"
+            f"Token counter: {config.token_counter_backend.value}",
             title="[bold yellow]DAIO Dry-Run[/]",
             border_style="yellow",
         )
@@ -298,17 +320,55 @@ def run(config_path: str) -> None:
     console.print(
         Panel(
             f"Model: {config.model}\n"
+            f"Backend: {config.backend.value}\n"
             f"Target: {config.target_path}\n"
             f"Scope: {config.scope.value}\n"
             f"Auto-commit: {config.auto_commit}\n"
             f"Token budget: {config.token_budget}\n"
-            f"Max retries: {config.max_retries}",
+            f"Max retries: {config.max_retries}\n"
+            f"SAST: {'on' if config.enable_sast else 'off'} ({config.sast_tool.value})\n"
+            f"Typecheck: {'on' if config.enable_typecheck else 'off'} ({config.type_checker.value})\n"
+            f"Dataset export: {'on' if config.dataset_export_enabled else 'off'}",
             title="[bold cyan]DAIO Pipeline[/]",
             border_style="cyan",
         )
     )
 
     exit_code = run_pipeline(config)
+    raise SystemExit(exit_code)
+
+
+# ---------------------------------------------------------------------------
+# daio resume
+# ---------------------------------------------------------------------------
+
+
+@main.command("resume")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True),
+    required=True,
+    help="Path to config.yaml.",
+)
+def resume(config_path: str) -> None:
+    """Resume a previously interrupted pipeline run, skipping succeeded functions."""
+    from daio.pipeline import run_pipeline
+
+    config = load_config(Path(config_path))
+
+    console.print(
+        Panel(
+            f"Model: {config.model}\n"
+            f"Backend: {config.backend.value}\n"
+            f"Target: {config.target_path}\n"
+            f"Resuming from: {config.output_dir / 'results.json'}",
+            title="[bold cyan]DAIO Resume[/]",
+            border_style="cyan",
+        )
+    )
+
+    exit_code = run_pipeline(config, resume=True)
     raise SystemExit(exit_code)
 
 

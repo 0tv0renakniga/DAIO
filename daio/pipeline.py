@@ -7,6 +7,7 @@ the pipeline aborts cleanly with a diagnostic message.
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,12 @@ from daio.surgeon import run as surgeon_run
 console = Console()
 
 
-def run_pipeline(config: DAIOConfig, *, dry_run: bool = False) -> int:
+def run_pipeline(
+    config: DAIOConfig,
+    *,
+    dry_run: bool = False,
+    resume: bool = False,
+) -> int:
     """Execute the full DAIO pipeline sequentially.
 
     Phases:
@@ -33,13 +39,29 @@ def run_pipeline(config: DAIOConfig, *, dry_run: bool = False) -> int:
         3. Surgeon — Dispatch to LLM, validate, apply, recalc offsets
         4. Audit Trail — Report, audit log, optional cleanup
 
+    V1.1 Fix #23: Resume support. When resume=True, loads prior
+    results.json and skips functions that already succeeded.
+
     Args:
         config: Validated DAIOConfig instance.
         dry_run: If True, skip Surgeon phase (generate packets only).
+        resume: If True, load prior results and skip succeeded UIDs.
 
     Returns:
         Exit code: 0 if all functions succeeded, 1 if any failed.
     """
+    # Load prior results for resume mode
+    prior_results: dict[str, Any] = {}
+    if resume:
+        results_path = config.output_dir / "results.json"
+        if results_path.exists():
+            prior_results = json.loads(results_path.read_text(encoding="utf-8"))
+            succeeded_count = sum(
+                1 for r in prior_results.values() if r.get("status") == "SUCCESS"
+            )
+            console.print(f"  [dim]Resuming: {succeeded_count} functions already succeeded, will be skipped[/]")
+        else:
+            console.print("  [yellow]⚠ No prior results.json found — starting fresh[/]")
     pipeline_start = time.monotonic()
 
     # Initialize audit logger
@@ -93,6 +115,18 @@ def run_pipeline(config: DAIOConfig, *, dry_run: bool = False) -> int:
         console.print("\n[bold yellow]Phase 3: Surgeon[/] — [dim]SKIPPED (dry-run mode)[/]")
         console.print(f"  [dim]Work packets saved to {config.output_dir / 'work_packets'}[/]")
     else:
+        # Fix #23: Filter out already-succeeded packets for resume mode
+        if resume and prior_results:
+            prior_succeeded = {
+                uid for uid, r in prior_results.items()
+                if r.get("status") == "SUCCESS"
+            }
+            filtered_packets = [p for p in work_packets if p.uid not in prior_succeeded]
+            skipped = len(work_packets) - len(filtered_packets)
+            if skipped:
+                console.print(f"  [dim]Skipping {skipped} already-succeeded functions[/]")
+            work_packets = filtered_packets
+
         console.print("\n[bold cyan]Phase 3: Surgeon[/] — LLM dispatch & refinement loop")
         try:
             surgeon_results = surgeon_run(config, manifest, work_packets)
@@ -100,6 +134,11 @@ def run_pipeline(config: DAIOConfig, *, dry_run: bool = False) -> int:
             console.print(f"[red]✗ Surgeon failed: {exc}[/]")
             audit_logger.log("PHASE_ERROR", "", "", "", {"phase": "surgeon", "error": str(exc)})
             return 1
+
+        # Merge prior results with new results for resume
+        if resume and prior_results:
+            merged = {**prior_results, **surgeon_results}
+            surgeon_results = merged
 
     # ---------------------------------------------------------------
     # Phase 4: Audit Trail

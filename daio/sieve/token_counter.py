@@ -1,22 +1,55 @@
-"""Token counter — estimate token counts for work packet budgeting.
+"""Token counter — pluggable token estimation for work packet budgeting.
 
-Uses a chars/4 heuristic by default. This is a reasonable approximation
-for most LLM tokenizers and avoids requiring model-specific tokenizer
-libraries. A configurable safety margin accounts for the heuristic's
-imprecision.
+V2.0 Fix #7: Pluggable backend system.
+    - 'heuristic' (default): chars/4 approximation, zero dependencies
+    - 'tiktoken': BPE-accurate counting via tiktoken library (optional dep)
+
+The backend is selectable per call. The heuristic is conservative for
+code (underestimates by ~15-20%) but avoids extra dependencies.
 """
 
 from __future__ import annotations
 
+from typing import Literal
 
-def estimate_tokens(text: str) -> int:
+# Lazy-loaded tiktoken module (avoid import cost if not used)
+_tiktoken_encoding = None
+
+
+def _get_tiktoken_encoding():
+    """Lazy-load tiktoken with cl100k_base encoding.
+
+    Returns:
+        tiktoken Encoding object.
+
+    Raises:
+        ImportError: If tiktoken is not installed.
+    """
+    global _tiktoken_encoding
+    if _tiktoken_encoding is None:
+        try:
+            import tiktoken
+        except ImportError as exc:
+            msg = (
+                "tiktoken is required for accurate token counting. "
+                "Install with: uv add tiktoken"
+            )
+            raise ImportError(msg) from exc
+        _tiktoken_encoding = tiktoken.get_encoding("cl100k_base")
+    return _tiktoken_encoding
+
+
+def estimate_tokens(
+    text: str,
+    backend: Literal["heuristic", "tiktoken"] = "heuristic",
+) -> int:
     """Estimate the number of tokens in a text string.
-
-    Uses the chars/4 heuristic, which is a reasonable approximation
-    for English text across most tokenizers (GPT, LLaMA, Qwen).
 
     Args:
         text: The text to estimate tokens for.
+        backend: Token counting backend.
+            - 'heuristic': chars/4 (fast, zero deps, ~85% accurate for code)
+            - 'tiktoken': BPE tokenizer (accurate, requires tiktoken)
 
     Returns:
         Estimated token count (integer, always >= 0).
@@ -29,6 +62,12 @@ def estimate_tokens(text: str) -> int:
     """
     if not text:
         return 0
+
+    if backend == "tiktoken":
+        enc = _get_tiktoken_encoding()
+        return len(enc.encode(text))
+
+    # Default: chars/4 heuristic
     return max(1, len(text) // 4)
 
 
@@ -58,3 +97,4 @@ def check_budget(
     if estimated_tokens < token_budget * 2:
         return "WARN"
     return "ABORT"
+

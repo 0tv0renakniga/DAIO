@@ -12,21 +12,41 @@ from __future__ import annotations
 import re
 
 
-# Primary pattern: code between UID anchors (dotall for multiline)
+# V1.1 Fix #9: Relaxed UID regex — allows whitespace around colons
+# Handles LLM hallucinations like "# UID: aaa111 : START" or "# UID :aaa111:START"
 _UID_BLOCK_RE = re.compile(
-    r"#\s*UID:([a-f0-9]{12}):START\s*\n(.*?)#\s*UID:\1:END",
+    r"#\s*UID\s*:\s*([a-f0-9]{12})\s*:\s*START\s*\n(.*?)#\s*UID\s*:\s*\1\s*:\s*END",
     re.DOTALL,
 )
 
 # Fallback: code inside markdown fences
 _MARKDOWN_FENCE_RE = re.compile(
-    r"```(?:python)?\s*\n(.*?)```",
+    r"```(?:python|py)?\s*\n(.*?)```",
     re.DOTALL,
 )
+
+# V1.1 Fix #3: Pattern to strip stray markdown fences from extracted code
+_FENCE_LINE_RE = re.compile(r"^\s*```(?:python|py)?\s*$")
 
 
 class ExtractionError(Exception):
     """Raised when the transformed code cannot be extracted from the LLM response."""
+
+
+def _sanitize_fences(lines: list[str]) -> list[str]:
+    """Strip stray markdown fence lines from extracted code.
+
+    V1.1 Fix #3: LLMs sometimes wrap code inside UID anchors with
+    markdown fences like ```python ... ```. These must be removed
+    or py_compile will fail on the backtick lines.
+
+    Args:
+        lines: Code lines potentially containing fence artifacts.
+
+    Returns:
+        Cleaned lines with fence lines removed.
+    """
+    return [line for line in lines if not _FENCE_LINE_RE.match(line)]
 
 
 def extract_transformed_code(response_text: str, uid: str) -> list[str]:
@@ -56,14 +76,14 @@ def extract_transformed_code(response_text: str, uid: str) -> list[str]:
     if match and match.group(1) == uid:
         code = match.group(2).strip()
         if code:
-            return code.splitlines()
+            return _sanitize_fences(code.splitlines())
 
     # Strategy 2: Any UID anchor match (LLM may have mangled the UID)
     match = _UID_BLOCK_RE.search(response_text)
     if match:
         code = match.group(2).strip()
         if code:
-            return code.splitlines()
+            return _sanitize_fences(code.splitlines())
 
     # Strategy 3: Markdown fence
     fence_match = _MARKDOWN_FENCE_RE.search(response_text)

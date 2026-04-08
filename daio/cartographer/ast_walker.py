@@ -128,9 +128,9 @@ def _has_docstring(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
 def _compute_end_line(node: ast.AST, source_lines: list[str]) -> int:
     """Compute the true end line of a function/class node.
 
-    ast.end_lineno can sometimes miss trailing lines. This walks all
-    child nodes to find the maximum line number, then scans forward
-    past any continuation.
+    V1.1 Fix #1: Forward-scans past trailing comments and blank lines
+    that logically belong to the function body. Without this, dangling
+    comments between functions get orphaned after code replacement.
 
     Args:
         node: The function or class AST node.
@@ -140,6 +140,40 @@ def _compute_end_line(node: ast.AST, source_lines: list[str]) -> int:
         1-indexed end line number.
     """
     max_line = node.end_lineno or node.lineno
+    total_lines = len(source_lines)
+
+    # Determine the function body's base indentation
+    # (the indentation of the `def` line itself)
+    def_indent = 0
+    if hasattr(node, "lineno") and node.lineno >= 1:
+        def_line = source_lines[node.lineno - 1]
+        def_indent = len(def_line) - len(def_line.lstrip())
+
+    # The body of a function is indented deeper than the def line.
+    # Trailing comments/blanks that belong to this function will be
+    # at depth > def_indent OR be completely blank.
+    body_indent = def_indent + 1  # any indent strictly greater
+
+    idx = max_line  # 0-indexed: max_line is 1-indexed, so source_lines[max_line] is the next line
+    while idx < total_lines:
+        line = source_lines[idx]
+        stripped = line.strip()
+
+        # Blank lines — consume (could belong to function)
+        if not stripped:
+            idx += 1
+            continue
+
+        # Comment-only lines at body indent or deeper — consume
+        line_indent = len(line) - len(line.lstrip())
+        if stripped.startswith("#") and line_indent > def_indent:
+            idx += 1
+            max_line = idx  # extend the end line
+            continue
+
+        # Any real code or top-level comment — stop
+        break
+
     return max_line
 
 

@@ -22,11 +22,12 @@ from typing import Any
 
 from rich.console import Console
 
+from daio.audit.dataset import export_training_pair
 from daio.config import DAIOConfig
+from daio.surgeon.dispatch import DispatchError, dispatch
 from daio.surgeon.applicator import apply_transform
 from daio.surgeon.extractor import ExtractionError, extract_transformed_code
 from daio.surgeon.offset import recalculate_offsets
-from daio.surgeon.ollama_client import OllamaError, dispatch
 from daio.surgeon.validator import validate
 from daio.sieve.work_packet import WorkPacket
 
@@ -146,20 +147,15 @@ def run(
         success = False
 
         for attempt in range(1, config.max_retries + 1):
-            # Step 1: Dispatch to Ollama
+            # Step 1: Dispatch to selected backend
             console.print(f"    [dim]Attempt {attempt}/{config.max_retries} — dispatching to {config.model}[/]")
 
             try:
-                response_text = dispatch(
-                    prompt=prompt,
-                    model=config.model,
-                    ollama_url=config.ollama_url,
-                    timeout=config.request_timeout,
-                )
-            except OllamaError as exc:
+                response_text = dispatch(prompt=prompt, config=config)
+            except DispatchError as exc:
                 error_msg = str(exc)
                 entry_result["errors"].append(f"Attempt {attempt}: {error_msg}")
-                console.print(f"    [red]✗ Ollama error: {error_msg[:100]}[/]")
+                console.print(f"    [red]✗ Dispatch error: {error_msg[:100]}[/]")
                 entry_result["retries"] = attempt
                 continue
 
@@ -181,6 +177,10 @@ def run(
                 ruff_config=config.ruff_config,
                 shrink_floor=config.loc_shrink_floor,
                 growth_ceiling=config.loc_growth_ceiling,
+                enable_sast=config.enable_sast,
+                sast_tool=config.sast_tool.value,
+                enable_typecheck=config.enable_typecheck,
+                type_checker=config.type_checker.value,
             )
 
             if val_result.passed:
@@ -210,6 +210,20 @@ def run(
                 entry_result["status"] = "SUCCESS"
                 entry_result["retries"] = attempt - 1
                 success = True
+
+                if config.dataset_export_enabled:
+                    export_training_pair(
+                        output_path=config.dataset_output_path,
+                        work_packet_text=packet.packet_text,
+                        transformed_code="\n".join(transformed_lines),
+                        metadata={
+                            "uid": packet.uid,
+                            "function_name": packet.function_name,
+                            "file_path": packet.file_path,
+                            "backend": config.backend.value,
+                            "model": config.model,
+                        },
+                    )
                 console.print(f"    [green]✓ Applied successfully[/]")
                 break
 

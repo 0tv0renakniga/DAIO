@@ -23,6 +23,42 @@ class ScopeMode(str, Enum):
     FILELIST = "filelist"
 
 
+class BackendMode(str, Enum):
+    """LLM backend selection."""
+
+    OLLAMA = "ollama"
+    LLAMACPP = "llamacpp"
+
+
+class FlashAttnMode(str, Enum):
+    """llama.cpp flash attention toggle."""
+
+    ON = "on"
+    OFF = "off"
+    AUTO = "auto"
+
+
+class SASTTool(str, Enum):
+    """Supported SAST backends."""
+
+    BANDIT = "bandit"
+    SEMGREP = "semgrep"
+
+
+class TypeCheckerTool(str, Enum):
+    """Supported type-check backends."""
+
+    MYPY = "mypy"
+    PYRIGHT = "pyright"
+
+
+class TokenCounterBackend(str, Enum):
+    """Supported token counting backends."""
+
+    HEURISTIC = "heuristic"
+    TIKTOKEN = "tiktoken"
+
+
 class DAIOConfig(BaseModel):
     """Root configuration schema for the DAIO pipeline.
 
@@ -70,6 +106,56 @@ class DAIOConfig(BaseModel):
         default="http://localhost:11434",
         description="Base URL for Ollama API",
     )
+    backend: BackendMode = Field(
+        default=BackendMode.OLLAMA,
+        description="LLM backend: 'ollama' or 'llamacpp'",
+    )
+
+    # --- llama.cpp Runtime ---
+    gguf_model_path: Optional[Path] = Field(
+        default=None,
+        description="Path to GGUF model file for llama.cpp backend (-m/--model)",
+    )
+    n_ctx: int = Field(
+        default=8192,
+        ge=256,
+        le=131072,
+        description="llama.cpp context size (-c/--ctx-size)",
+    )
+    n_gpu_layers: int | str = Field(
+        default=0,
+        description="llama.cpp GPU layers (-ngl/--n-gpu-layers): int, 'auto', or 'all'",
+    )
+    n_threads: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=512,
+        description="llama.cpp thread count (-t/--threads), unset lets runtime decide",
+    )
+    n_predict: int = Field(
+        default=4096,
+        ge=-1,
+        le=1048576,
+        description="llama.cpp max tokens (-n/--predict), -1 means infinity",
+    )
+    temperature: float = Field(
+        default=0.1,
+        ge=0.0,
+        le=2.0,
+        description="Sampling temperature (--temp/--temperature)",
+    )
+    flash_attn: FlashAttnMode = Field(
+        default=FlashAttnMode.AUTO,
+        description="llama.cpp flash attention mode (-fa/--flash-attn): on/off/auto",
+    )
+    mmap: bool = Field(
+        default=True,
+        description="llama.cpp model mmap toggle (--mmap/--no-mmap)",
+    )
+    mlock: bool = Field(
+        default=False,
+        description="llama.cpp memory lock toggle (--mlock)",
+    )
 
     # --- Target Configuration ---
     target_path: Path = Field(
@@ -101,6 +187,10 @@ class DAIOConfig(BaseModel):
         ge=128,
         le=4096,
         description="Max tokens for global header in work packet",
+    )
+    prompt_template_path: str | None = Field(
+        default=None,
+        description="Path to custom prompt template file (V1.2 #22)",
     )
 
     # --- Retry & Validation ---
@@ -139,6 +229,34 @@ class DAIOConfig(BaseModel):
         ge=30,
         le=3600,
         description="HTTP timeout in seconds for Ollama (CPU inference can be slow)",
+    )
+    enable_sast: bool = Field(
+        default=False,
+        description="Enable SAST validation gate",
+    )
+    sast_tool: SASTTool = Field(
+        default=SASTTool.BANDIT,
+        description="SAST tool backend: 'bandit' or 'semgrep'",
+    )
+    enable_typecheck: bool = Field(
+        default=False,
+        description="Enable type-check validation gate",
+    )
+    type_checker: TypeCheckerTool = Field(
+        default=TypeCheckerTool.MYPY,
+        description="Type checker backend: 'mypy' or 'pyright'",
+    )
+    token_counter_backend: TokenCounterBackend = Field(
+        default=TokenCounterBackend.HEURISTIC,
+        description="Token counting backend: 'heuristic' or 'tiktoken'",
+    )
+    dataset_export_enabled: bool = Field(
+        default=False,
+        description="Enable JSONL fine-tuning dataset export for successful transforms",
+    )
+    dataset_output_path: Path = Field(
+        default=Path(".daio/training_dataset.jsonl"),
+        description="Output path for JSONL dataset export",
     )
     output_dir: Path = Field(
         default=Path(".daio"),
@@ -209,6 +327,34 @@ class DAIOConfig(BaseModel):
             return resolved
         return v
 
+    @field_validator("gguf_model_path")
+    @classmethod
+    def gguf_model_path_must_exist_if_set(cls, v: Optional[Path]) -> Optional[Path]:
+        """Validate GGUF model path exists if provided."""
+        if v is not None:
+            resolved = v.resolve()
+            if not resolved.exists():
+                msg = f"gguf_model_path does not exist: {resolved}"
+                raise ValueError(msg)
+            return resolved
+        return v
+
+    @field_validator("n_gpu_layers")
+    @classmethod
+    def validate_n_gpu_layers(cls, v: int | str) -> int | str:
+        """Allow int GPU layers or special string values."""
+        if isinstance(v, int):
+            if v < -1:
+                msg = "n_gpu_layers must be >= -1, or one of: 'auto', 'all'"
+                raise ValueError(msg)
+            return v
+        if isinstance(v, str):
+            lowered = v.lower().strip()
+            if lowered in {"auto", "all"}:
+                return lowered
+        msg = "n_gpu_layers must be an int, 'auto', or 'all'"
+        raise ValueError(msg)
+
     @model_validator(mode="after")
     def filelist_required_when_scope_is_filelist(self) -> "DAIOConfig":
         """Ensure file_list is populated when scope is 'filelist'.
@@ -223,6 +369,9 @@ class DAIOConfig(BaseModel):
             if not self.file_list:
                 msg = "file_list must be provided when scope is 'filelist'"
                 raise ValueError(msg)
+        if self.backend == BackendMode.LLAMACPP and self.gguf_model_path is None:
+            msg = "gguf_model_path must be provided when backend is 'llamacpp'"
+            raise ValueError(msg)
         return self
 
 

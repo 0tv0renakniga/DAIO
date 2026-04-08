@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -407,6 +408,24 @@ class TestAssembleWorkPacket:
                 file_path="test.py",
                 rules_text="Rules.",
             )
+
+    def test_token_counter_backend_propagates(self) -> None:
+        """assemble_work_packet should pass token backend to estimator."""
+        lines = ANCHORED_SOURCE.splitlines()
+        with patch("daio.sieve.work_packet.estimate_tokens", return_value=123) as mock_estimate:
+            packet = assemble_work_packet(
+                source_text=ANCHORED_SOURCE,
+                source_lines=lines,
+                uid="aaa111bbb222",
+                function_name="add",
+                file_path="test.py",
+                rules_text="Add docstrings.",
+                token_counter_backend="heuristic",
+            )
+        assert packet.estimated_tokens == 123
+        mock_estimate.assert_called_once()
+        _, kwargs = mock_estimate.call_args
+        assert kwargs["backend"] == "heuristic"
 
 
 class TestSaveWorkPacket:

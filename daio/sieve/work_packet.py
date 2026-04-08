@@ -2,11 +2,13 @@
 
 A work packet is the complete prompt bundle sent to the LLM. It contains:
     1. RULES — the refactoring instructions from rules.md
-    2. GLOBAL CONTEXT — filtered imports and constants
+    2. GLOBAL CONTEXT — filtered imports, constants, local stubs, __init__
     3. TARGET FUNCTION — the code between UID anchors
     4. INSTRUCTION — the transformation directive
 
-The assembler enforces the token budget and flags oversized packets.
+V1.2 additions:
+    - #22: Prompt template engine — configurable templates via str.format_map
+    - Passes target_function_name and class_name for header enrichment
 """
 
 from __future__ import annotations
@@ -20,8 +22,8 @@ from daio.sieve.snippet import extract_by_uid
 from daio.sieve.token_counter import check_budget, estimate_tokens
 
 
-# Work packet template
-_PACKET_TEMPLATE = """\
+# Default work packet template
+_DEFAULT_TEMPLATE = """\
 === RULES ===
 {rules}
 
@@ -72,8 +74,16 @@ def assemble_work_packet(
     rules_text: str,
     token_budget: int = 4096,
     header_token_budget: int = 512,
+    *,
+    class_name: str | None = None,
+    prompt_template: str | None = None,
+    token_counter_backend: str = "heuristic",
 ) -> WorkPacket:
     """Assemble a complete work packet for a single function.
+
+    V1.2 additions:
+        - class_name: Enables __init__ context injection (#10)
+        - prompt_template: Custom template string (#22)
 
     Args:
         source_text: Full source file as a string.
@@ -84,6 +94,9 @@ def assemble_work_packet(
         rules_text: Contents of the rules.md file.
         token_budget: Maximum token budget for the entire work packet.
         header_token_budget: Maximum token budget for the global header.
+        class_name: Parent class name if this is a method.
+        prompt_template: Custom template string (uses str.format_map).
+        token_counter_backend: Token counting backend ('heuristic' or 'tiktoken').
 
     Returns:
         Assembled WorkPacket with budget status.
@@ -95,21 +108,35 @@ def assemble_work_packet(
     snippet_lines, _, _ = extract_by_uid(source_lines, uid)
     snippet_text = "\n".join(snippet_lines)
 
-    # Build the pruned global header
+    # Build the pruned global header (V1.2: enriched with stubs + init)
     header = build_global_header(
-        source_text, snippet_lines, header_token_budget
+        source_text,
+        snippet_lines,
+        header_token_budget,
+        target_function_name=function_name,
+        class_name=class_name,
     )
 
-    # Assemble the packet
-    packet_text = _PACKET_TEMPLATE.format(
-        rules=rules_text.strip(),
-        header=header,
-        uid=uid,
-        snippet=snippet_text,
-    )
+    # V1.2 Fix #22: Prompt template engine
+    template = prompt_template or _DEFAULT_TEMPLATE
+    template_vars = {
+        "rules": rules_text.strip(),
+        "header": header,
+        "uid": uid,
+        "snippet": snippet_text,
+        "function_name": function_name,
+        "file_path": file_path,
+        "class_name": class_name or "",
+    }
+
+    try:
+        packet_text = template.format_map(template_vars)
+    except KeyError:
+        # Fallback to default if custom template has unknown placeholders
+        packet_text = _DEFAULT_TEMPLATE.format_map(template_vars)
 
     # Check token budget
-    tokens = estimate_tokens(packet_text)
+    tokens = estimate_tokens(packet_text, backend=token_counter_backend)
     status = check_budget(tokens, token_budget)
 
     return WorkPacket(

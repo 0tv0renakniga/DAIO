@@ -4,28 +4,48 @@
 # --- LLM ---
 model: "qwen2.5-coder:7b-instruct-q8_0"  # Any Ollama-compatible model name
 ollama_url: "http://localhost:11434"
+backend: "ollama"                         # "ollama" | "llamacpp"
+
+# --- llama.cpp (used when backend=llamacpp) ---
+# gguf_model_path: "/models/model.gguf"   # -m / --model
+n_ctx: 8192                               # -c / --ctx-size
+n_gpu_layers: 0                           # -ngl / --n-gpu-layers (int | "auto" | "all")
+# n_threads: 8                            # -t / --threads
+n_predict: 4096                           # -n / --predict (-1 = infinity)
+temperature: 0.1                          # --temp / --temperature
+flash_attn: "auto"                        # -fa / --flash-attn ("on" | "off" | "auto")
+mmap: true                                # --mmap / --no-mmap
+mlock: false                              # --mlock
 
 # --- Target ---
 target_path: "./fixtures/synthetic_target"  # Path to the codebase to refactor
 rules_path: "./rules.example.md"            # Refactoring instructions for the LLM
 scope: "full"                               # "full" | "module" | "filelist"
-# file_list:                                # Uncomment when scope is "filelist"
+# file_list:                                # Uncomment and list files when scope is "filelist"
 #   - "src/module_a.py"
 #   - "src/module_b.py"
 
 # --- Token Budget ---
 token_budget: 4096                          # Max tokens per work packet (chars / 4)
-header_token_budget: 512                    # Max tokens for global header
+header_token_budget: 512                    # Max tokens for global header (imports/constants)
+prompt_template_path: null                  # Optional custom prompt template file
 
 # --- Retry & Validation ---
 max_retries: 3                              # LLM retry attempts on validation failure
-loc_shrink_floor: 0.3                       # Min output/input LOC ratio
-loc_growth_ceiling: 3.0                     # Max output/input LOC ratio
+loc_shrink_floor: 0.3                       # Min output/input LOC ratio (below = hallucination)
+loc_growth_ceiling: 3.0                     # Max output/input LOC ratio (above = hallucination)
 
 # --- Git ---
 auto_commit: true                           # Git-commit per successfully refactored function
 
 # --- Infrastructure ---
 # ruff_config: "./ruff.toml"                # Optional: path to ruff config
-request_timeout: 600                        # Ollama HTTP timeout in seconds
+request_timeout: 600                        # Ollama HTTP timeout in seconds (CPU can be slow)
+enable_sast: false                          # Enable security validation gate
+sast_tool: "bandit"                         # "bandit" | "semgrep"
+enable_typecheck: false                     # Enable type-check validation gate
+type_checker: "mypy"                        # "mypy" | "pyright"
+token_counter_backend: "heuristic"          # "heuristic" | "tiktoken"
+dataset_export_enabled: false               # Export successful transforms as JSONL
+dataset_output_path: ".daio/training_dataset.jsonl"  # Dataset export path
 output_dir: ".daio"                         # Pipeline artifact directory

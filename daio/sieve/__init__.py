@@ -65,6 +65,14 @@ def run(
 
         uid = entry["uid"]
         func_name = entry["name"]
+        class_name = entry.get("class_name")
+
+        # V1.2 #22: Load custom prompt template if configured
+        prompt_template: str | None = None
+        if config.prompt_template_path:
+            tmpl_path = Path(config.prompt_template_path)
+            if tmpl_path.exists():
+                prompt_template = tmpl_path.read_text(encoding="utf-8")
 
         try:
             packet = assemble_work_packet(
@@ -76,6 +84,9 @@ def run(
                 rules_text=rules_text,
                 token_budget=config.token_budget,
                 header_token_budget=config.header_token_budget,
+                class_name=class_name,
+                prompt_template=prompt_template,
+                token_counter_backend=config.token_counter_backend.value,
             )
         except ValueError as exc:
             console.print(f"  [red]✗ {func_name} ({rel_path}): {exc}[/]")

@@ -121,6 +121,69 @@ class TestDAIOConfigValid:
         config = DAIOConfig(**valid_config_dict)
         assert config.target_path.is_absolute()
 
+    def test_backend_llamacpp_with_model_path(self, valid_config_dict: dict, tmp_path: Path) -> None:
+        """llamacpp backend should accept a valid gguf_model_path."""
+        gguf = tmp_path / "model.gguf"
+        gguf.write_text("mock-gguf", encoding="utf-8")
+        valid_config_dict["backend"] = "llamacpp"
+        valid_config_dict["gguf_model_path"] = str(gguf)
+        config = DAIOConfig(**valid_config_dict)
+        assert config.backend.value == "llamacpp"
+        assert config.gguf_model_path == gguf.resolve()
+
+    def test_n_gpu_layers_accepts_int(self, valid_config_dict: dict) -> None:
+        """n_gpu_layers should accept integer values."""
+        valid_config_dict["n_gpu_layers"] = 32
+        config = DAIOConfig(**valid_config_dict)
+        assert config.n_gpu_layers == 32
+
+    def test_n_gpu_layers_accepts_auto(self, valid_config_dict: dict) -> None:
+        """n_gpu_layers should accept the 'auto' keyword."""
+        valid_config_dict["n_gpu_layers"] = "auto"
+        config = DAIOConfig(**valid_config_dict)
+        assert config.n_gpu_layers == "auto"
+
+    def test_n_gpu_layers_accepts_all(self, valid_config_dict: dict) -> None:
+        """n_gpu_layers should accept the 'all' keyword."""
+        valid_config_dict["n_gpu_layers"] = "all"
+        config = DAIOConfig(**valid_config_dict)
+        assert config.n_gpu_layers == "all"
+
+    def test_phase_c_fields_parse(self, valid_config_dict: dict, tmp_path: Path) -> None:
+        """Phase C config fields should parse with explicit values."""
+        gguf = tmp_path / "phase_c_model.gguf"
+        gguf.write_text("mock", encoding="utf-8")
+        dataset_path = tmp_path / "dataset.jsonl"
+
+        valid_config_dict.update(
+            {
+                "backend": "llamacpp",
+                "gguf_model_path": str(gguf),
+                "n_ctx": 16384,
+                "n_gpu_layers": 16,
+                "n_threads": 8,
+                "n_predict": -1,
+                "temperature": 0.2,
+                "flash_attn": "on",
+                "mmap": False,
+                "mlock": True,
+                "enable_sast": True,
+                "sast_tool": "bandit",
+                "enable_typecheck": True,
+                "type_checker": "pyright",
+                "token_counter_backend": "tiktoken",
+                "dataset_export_enabled": True,
+                "dataset_output_path": str(dataset_path),
+            }
+        )
+        config = DAIOConfig(**valid_config_dict)
+        assert config.backend.value == "llamacpp"
+        assert config.n_predict == -1
+        assert config.flash_attn.value == "on"
+        assert config.enable_sast is True
+        assert config.enable_typecheck is True
+        assert config.token_counter_backend.value == "tiktoken"
+
 
 # ---------------------------------------------------------------------------
 # Sad Path Tests — Edge Cases & Adversarial Inputs
@@ -199,6 +262,42 @@ class TestDAIOConfigInvalid:
         """ruff_config pointing to nonexistent file should raise."""
         valid_config_dict["ruff_config"] = "/nonexistent/ruff.toml"
         with pytest.raises(ValueError, match="ruff_config does not exist"):
+            DAIOConfig(**valid_config_dict)
+
+    def test_llamacpp_requires_gguf_path(self, valid_config_dict: dict) -> None:
+        """llamacpp backend without gguf_model_path should raise."""
+        valid_config_dict["backend"] = "llamacpp"
+        with pytest.raises(ValueError, match="gguf_model_path must be provided"):
+            DAIOConfig(**valid_config_dict)
+
+    def test_invalid_backend_enum_raises(self, valid_config_dict: dict) -> None:
+        """Unknown backend should fail enum validation."""
+        valid_config_dict["backend"] = "unknown-backend"
+        with pytest.raises(Exception):
+            DAIOConfig(**valid_config_dict)
+
+    def test_invalid_sast_tool_enum_raises(self, valid_config_dict: dict) -> None:
+        """Unknown sast_tool should fail enum validation."""
+        valid_config_dict["sast_tool"] = "unknown-tool"
+        with pytest.raises(Exception):
+            DAIOConfig(**valid_config_dict)
+
+    def test_invalid_type_checker_enum_raises(self, valid_config_dict: dict) -> None:
+        """Unknown type_checker should fail enum validation."""
+        valid_config_dict["type_checker"] = "unknown-checker"
+        with pytest.raises(Exception):
+            DAIOConfig(**valid_config_dict)
+
+    def test_invalid_token_counter_backend_enum_raises(self, valid_config_dict: dict) -> None:
+        """Unknown token counter backend should fail enum validation."""
+        valid_config_dict["token_counter_backend"] = "unknown-backend"
+        with pytest.raises(Exception):
+            DAIOConfig(**valid_config_dict)
+
+    def test_invalid_n_gpu_layers_string_raises(self, valid_config_dict: dict) -> None:
+        """n_gpu_layers should reject unsupported string keywords."""
+        valid_config_dict["n_gpu_layers"] = "sometimes"
+        with pytest.raises(ValueError, match="n_gpu_layers must be an int, 'auto', or 'all'"):
             DAIOConfig(**valid_config_dict)
 
 

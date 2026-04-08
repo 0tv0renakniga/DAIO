@@ -7,14 +7,16 @@ through Cartographer + Sieve phases (Surgeon is mocked since no live Ollama).
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
 from click.testing import CliRunner
 
-from daio.cli import main
+from daio.cli import DEFAULT_CONFIG, main
 from daio.config import DAIOConfig
 from daio.pipeline import run_manifest_only, run_pipeline
 
@@ -24,6 +26,52 @@ from daio.pipeline import run_manifest_only, run_pipeline
 # ---------------------------------------------------------------------------
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "synthetic_target"
+
+
+def _normalize_config_docs(raw: str) -> list[tuple[str, str, str]]:
+    """Normalize config text for doc parity checks.
+
+    Keeps a stable, order-sensitive representation of:
+    - section headers
+    - full-line comment markers
+    - active keys and their inline comments (value ignored)
+    - commented-out keys and their inline comments (value ignored)
+    """
+    normalized: list[tuple[str, str, str]] = []
+
+    section_re = re.compile(r"^#\s*---\s*.+\s*---\s*$")
+    active_key_re = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*.*?(?:\s+#\s*(.*))?$")
+    commented_key_re = re.compile(
+        r"^#\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*.*?(?:\s+#\s*(.*))?$"
+    )
+
+    for line in raw.splitlines():
+        stripped = line.rstrip()
+        if not stripped:
+            continue
+
+        if section_re.match(stripped):
+            normalized.append(("section", stripped.strip(), ""))
+            continue
+
+        commented_key_match = commented_key_re.match(stripped)
+        if commented_key_match:
+            key = commented_key_match.group(1)
+            comment = (commented_key_match.group(2) or "").strip()
+            normalized.append(("commented_key", key, comment))
+            continue
+
+        active_key_match = active_key_re.match(stripped)
+        if active_key_match:
+            key = active_key_match.group(1)
+            comment = (active_key_match.group(2) or "").strip()
+            normalized.append(("active_key", key, comment))
+            continue
+
+        if stripped.lstrip().startswith("#"):
+            normalized.append(("comment_line", stripped.strip(), ""))
+
+    return normalized
 
 
 @pytest.fixture()
@@ -81,6 +129,10 @@ class TestCLIInit:
         assert result.exit_code == 0
         assert (tmp_path / "new_project" / "config.yaml").exists()
         assert (tmp_path / "new_project" / "rules.md").exists()
+        cfg_text = (tmp_path / "new_project" / "config.yaml").read_text(encoding="utf-8")
+        assert 'backend: "ollama"' in cfg_text
+        assert "token_counter_backend" in cfg_text
+        assert "dataset_export_enabled" in cfg_text
 
     def test_init_idempotent(self, tmp_path: Path) -> None:
         """Running init twice should not overwrite existing files."""
@@ -93,6 +145,19 @@ class TestCLIInit:
         assert result.exit_code == 0
         # Should NOT have overwritten
         assert (tmp_path / "config.yaml").read_text() == "modified"
+
+    def test_init_template_keys_match_config_example(self) -> None:
+        """DEFAULT_CONFIG and config.example.yaml should expose same key set."""
+        example_path = Path(__file__).parent.parent / "config.example.yaml"
+        example_cfg = yaml.safe_load(example_path.read_text(encoding="utf-8"))
+        init_cfg = yaml.safe_load(DEFAULT_CONFIG)
+        assert set(init_cfg.keys()) == set(example_cfg.keys())
+
+    def test_init_template_doc_structure_matches_config_example(self) -> None:
+        """Section order + comment markers should stay in sync."""
+        example_path = Path(__file__).parent.parent / "config.example.yaml"
+        example_text = example_path.read_text(encoding="utf-8")
+        assert _normalize_config_docs(DEFAULT_CONFIG) == _normalize_config_docs(example_text)
 
 
 class TestCLIValidate:
@@ -186,7 +251,7 @@ class TestFullPipelineMocked:
         # First run dry-run to get work packets, then mock the surgeon
         # We need to mock at the dispatch level
 
-        def mock_dispatch(prompt, model, **kwargs):
+        def mock_dispatch(prompt, config):
             """Return a valid transformed function with UID anchors."""
             # Extract UID from the prompt
             import re
@@ -247,6 +312,43 @@ class TestFullPipelineMocked:
         # Verify report mentions success
         report = (config.output_dir / "report.md").read_text(encoding="utf-8")
         assert "Succeeded" in report
+
+    def test_full_pipeline_dataset_export(self, config: DAIOConfig) -> None:
+        """Dataset export should write JSONL entries when enabled."""
+        config.dataset_export_enabled = True
+        config.dataset_output_path = config.output_dir / "dataset.jsonl"
+        config.enable_sast = False
+        config.enable_typecheck = False
+
+        def mock_dispatch(prompt, config):
+            import re
+
+            match = re.search(r"UID:([a-f0-9]{12}):START", prompt)
+            if not match:
+                return "def unknown():\n    pass\n"
+            uid = match.group(1)
+
+            block_re = re.compile(rf"# UID:{uid}:START\n(.*?)# UID:{uid}:END", re.DOTALL)
+            block_match = block_re.search(prompt)
+            if block_match:
+                original = block_match.group(1).strip()
+                lines = original.splitlines()
+                if lines and lines[0].strip().startswith(("def ", "async def ")):
+                    indent = len(lines[0]) - len(lines[0].lstrip()) + 4
+                    docstring = " " * indent + '"""Docstring added by DAIO."""'
+                    code = "\n".join([lines[0], docstring] + lines[1:])
+                else:
+                    code = original
+                return f"# UID:{uid}:START\n{code}\n# UID:{uid}:END\n"
+            return "def unknown():\n    pass\n"
+
+        with patch("daio.surgeon.dispatch", side_effect=mock_dispatch):
+            run_pipeline(config)
+
+        if (config.output_dir / "results.json").exists():
+            results = json.loads((config.output_dir / "results.json").read_text(encoding="utf-8"))
+            if any(r.get("status") == "SUCCESS" for r in results.values()):
+                assert config.dataset_output_path.exists()
 
 
 class TestCLIDryRun:
