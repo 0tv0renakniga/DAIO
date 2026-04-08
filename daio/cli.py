@@ -6,10 +6,12 @@ Entry points:
     daio manifest   — Run Cartographer only, inspect manifest
     daio dry-run    — Generate work packets without dispatching to LLM
     daio validate   — Validate a config file
+    daio rollback   — Revert all DAIO commits from a results.json
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import click
@@ -86,7 +88,7 @@ Add Google-style docstrings to every function and method.
 
 ```python
 def calculate_distance(x1: float, y1: float, x2: float, y2: float) -> float:
-    \"\"\"Calculate the Euclidean distance between two 2D points.
+    \\\"\\\"\\\"Calculate the Euclidean distance between two 2D points.
 
     Args:
         x1: X-coordinate of the first point.
@@ -96,7 +98,7 @@ def calculate_distance(x1: float, y1: float, x2: float, y2: float) -> float:
 
     Returns:
         The Euclidean distance as a float.
-    \"\"\"
+    \\\"\\\"\\\"
     return ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
 ```
 """
@@ -202,10 +204,42 @@ def validate_config(config_path: str) -> None:
     help="Path to config.yaml.",
 )
 def show_manifest(config_path: str) -> None:
-    """Run the Cartographer phase and display the manifest."""
+    """Run the Cartographer phase only and display the manifest."""
+    from daio.pipeline import run_manifest_only
+
     config = load_config(Path(config_path))
-    console.print(f"[dim]Cartographer would scan: {config.target_path}[/]")
-    console.print("[yellow]⚠ Cartographer not yet implemented (M1)[/]")
+
+    console.print(
+        Panel(
+            f"Target: {config.target_path}\nScope: {config.scope.value}",
+            title="[bold cyan]DAIO Manifest[/]",
+            border_style="cyan",
+        )
+    )
+
+    manifest = run_manifest_only(config)
+
+    # Display summary table
+    table = Table(title="Manifest Summary", show_lines=True)
+    table.add_column("File", style="cyan")
+    table.add_column("Functions", style="white", justify="right")
+    table.add_column("Processable", style="green", justify="right")
+    table.add_column("Nested", style="yellow", justify="right")
+
+    for rel_path, file_data in manifest.get("files", {}).items():
+        funcs = file_data.get("functions", [])
+        total = len(funcs)
+        processable = sum(1 for f in funcs if not f.get("nested") and f.get("status") == "PENDING")
+        nested = sum(1 for f in funcs if f.get("nested"))
+        table.add_row(rel_path, str(total), str(processable), str(nested))
+
+    console.print(table)
+
+    total_funcs = sum(
+        len(fd.get("functions", []))
+        for fd in manifest.get("files", {}).values()
+    )
+    console.print(f"\n[dim]Total: {total_funcs} functions across {len(manifest.get('files', {}))} files[/]")
 
 
 # ---------------------------------------------------------------------------
@@ -222,10 +256,24 @@ def show_manifest(config_path: str) -> None:
     help="Path to config.yaml.",
 )
 def dry_run(config_path: str) -> None:
-    """Generate work packets without dispatching to the LLM."""
+    """Generate work packets and save them without dispatching to the LLM."""
+    from daio.pipeline import run_pipeline
+
     config = load_config(Path(config_path))
-    console.print(f"[dim]Dry-run against: {config.target_path}[/]")
-    console.print("[yellow]⚠ Sieve not yet implemented (M2)[/]")
+
+    console.print(
+        Panel(
+            f"Model: {config.model}\n"
+            f"Target: {config.target_path}\n"
+            f"Scope: {config.scope.value}\n"
+            f"Token budget: {config.token_budget}",
+            title="[bold yellow]DAIO Dry-Run[/]",
+            border_style="yellow",
+        )
+    )
+
+    exit_code = run_pipeline(config, dry_run=True)
+    raise SystemExit(exit_code)
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +291,8 @@ def dry_run(config_path: str) -> None:
 )
 def run(config_path: str) -> None:
     """Execute the full DAIO pipeline."""
+    from daio.pipeline import run_pipeline
+
     config = load_config(Path(config_path))
 
     console.print(
@@ -250,13 +300,75 @@ def run(config_path: str) -> None:
             f"Model: {config.model}\n"
             f"Target: {config.target_path}\n"
             f"Scope: {config.scope.value}\n"
-            f"Auto-commit: {config.auto_commit}",
+            f"Auto-commit: {config.auto_commit}\n"
+            f"Token budget: {config.token_budget}\n"
+            f"Max retries: {config.max_retries}",
             title="[bold cyan]DAIO Pipeline[/]",
             border_style="cyan",
         )
     )
 
-    console.print("[yellow]⚠ Pipeline phases not yet implemented (M1–M4)[/]")
+    exit_code = run_pipeline(config)
+    raise SystemExit(exit_code)
+
+
+# ---------------------------------------------------------------------------
+# daio rollback
+# ---------------------------------------------------------------------------
+
+
+@main.command("rollback")
+@click.option(
+    "--results",
+    "results_path",
+    type=click.Path(exists=True),
+    required=True,
+    help="Path to results.json from a previous run.",
+)
+@click.option(
+    "--cwd",
+    "working_dir",
+    type=click.Path(exists=True),
+    default=".",
+    help="Working directory for git commands.",
+)
+def rollback(results_path: str, working_dir: str) -> None:
+    """Revert all DAIO commits from a previous pipeline run."""
+    from daio.audit.rollback import rollback_all
+
+    results_file = Path(results_path)
+    surgeon_results = json.loads(results_file.read_text(encoding="utf-8"))
+
+    committed = sum(
+        1 for r in surgeon_results.values()
+        if r.get("commit_hash") and r.get("status") == "SUCCESS"
+    )
+
+    if committed == 0:
+        console.print("[yellow]No committed transforms found in results — nothing to rollback.[/]")
+        return
+
+    console.print(
+        Panel(
+            f"Results file: {results_file}\n"
+            f"Commits to revert: {committed}",
+            title="[bold red]DAIO Rollback[/]",
+            border_style="red",
+        )
+    )
+
+    if not click.confirm("Proceed with rollback?"):
+        console.print("[dim]Rollback cancelled.[/]")
+        return
+
+    results = rollback_all(surgeon_results, cwd=Path(working_dir))
+    succeeded = sum(1 for v in results.values() if v)
+    failed = sum(1 for v in results.values() if not v)
+
+    if failed > 0:
+        console.print(f"[yellow]⚠ Rollback partially complete: {succeeded} reverted, {failed} failed[/]")
+    else:
+        console.print(f"[green]✓ Rollback complete: {succeeded} commits reverted[/]")
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +386,7 @@ def _display_config_table(config: DAIOConfig) -> None:
     table.add_column("Field", style="cyan", no_wrap=True)
     table.add_column("Value", style="white")
 
-    for field_name, field_info in config.model_fields.items():
+    for field_name, field_info in DAIOConfig.model_fields.items():
         value = getattr(config, field_name)
         desc = field_info.description or ""
         display_val = str(value)
